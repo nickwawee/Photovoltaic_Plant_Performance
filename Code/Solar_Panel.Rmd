@@ -1,0 +1,230 @@
+---
+title: "Solar Panel Power Generation"
+author: "Nick Wawee"
+date: "7/3/2021"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())
+knitr::opts_chunk$set(echo = TRUE)
+library(reshape2)
+library(ggpubr)
+library ("foreign")
+library(arm)
+plotdists = function(df, path, brtype = 'Scott'){
+  plotlist = list()
+  for (col in colnames(df)){
+    x = df[,col]
+    if (class(x)=='factor'){
+      dfnew = data.frame(col = factor(), count = integer())
+      for (level in levels(x)){
+        count = length(which(x==level))
+        dfnew = rbind(data.frame(col= level, count = count), dfnew)
+      }
+      dfnew$col <- factor(dfnew$col, levels = dfnew$col[order(dfnew$count)])
+      p = ggplot(dfnew, aes(x=col, y=count))+
+        geom_bar(stat= 'identity')+
+        plot_opts+
+        labs(x = col, y = 'Count')+
+        geom_text(aes(label = count), vjust = -0.3) + theme(axis.title = element_text(size = 24))
+      plotlist[[col]] = p
+    }else if (class(x) == 'numeric' | class(x) == 'integer'){
+      dfnew =data.frame(col = class(x))
+      histinfo = hist(x = x , breaks=brtype, plot = F)
+      p = ggplot(as.data.frame(x), aes(x=x))+
+        geom_histogram(bins = length(histinfo$breaks))+plot_opts+
+        geom_vline(aes(xintercept = median(x)), 
+             linetype = "dashed", size = 1, col = 'red')+
+        labs(x = col, y = 'Count')+ theme(axis.title = element_text(size = 24))
+        
+      plotlist[[col]] = p 
+    }
+  }
+  pfinal =ggarrange(plotlist = plotlist)
+  ggsave(paste(path,'dists.pdf',sep=""), pfinal, device = 'pdf',height=1.3*length(plotlist) , width=1.3*length(plotlist)*1.5, units="in", limitsize = FALSE, dpi=900)
+  return(pfinal)
+}
+plot_opts =   theme_bw()+
+  theme(panel.border = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black") , axis.title.x = element_text(face='bold', size = 14), axis.title.y = element_text(face='bold', size = 14), plot.title = element_text(face='bold', size = 18, hjust=0.5))
+
+
+infl_analysis = function(l_m){
+  k = length(l_m$coefficients)-1
+  n = length(l_m$fitted.values)
+  row_num = 1:n
+  #Leverage points
+  hatdf = data.frame(Values = hatvalues(l_m), Row_Num = row_num, Type = rep('Hat Values', length(row_num)), Point_Type = rep('Leverage', length(row_num)), Bound1 = 2*(k+1)/n, Bound2 = 2*(k+1)/n)
+  hatdf$Label = NA
+  inds = which(hatvalues(l_m)>2*(k+1)/n)
+  if(length(inds)!= 0){hatdf$Label[inds] = row_num[inds]}
+  #Outliers
+  instdf = data.frame(Values = rstandard(l_m), Row_Num = row_num, Type = rep('Internally Standardized Residuals', length(row_num)), Point_Type = rep('Outlier', length(row_num)), Bound1 = 3, Bound2 = -3)
+  instdf$Label = NA
+  inds = which(rstandard(l_m) > 3 | rstandard(l_m) < -3)
+  if(length(inds)!=0){instdf$Label[inds] = row_num[inds]}
+  
+  extdf = data.frame(Values = rstudent(l_m), Row_Num = row_num, Type = rep('Externally Standardized Residuals', length(row_num)), Point_Type = rep('Outlier', length(row_num)), Bound1 = 3, Bound2 = -3)
+  extdf$Label = NA
+  inds = which(rstudent(l_m) > 3 | rstudent(l_m) < -3)
+  if(length(inds)!=0){extdf$Label[inds] = row_num[inds]}
+  
+  #Influential
+  dfitsdf = data.frame(Values = dffits(l_m), Row_Num = row_num, Type = rep('DEFFITS', length(row_num)),Point_Type = rep('Influential', length(row_num)), Bound1 = 2*sqrt((k+2)/(n-k-2)), Bound2 = -2*sqrt((k+2)/(n-k-2)))
+  dfitsdf$Label = NA
+  inds = which(dffits(l_m) > 2*sqrt((k+2)/(n-k-2)) | dffits(l_m) < -2*sqrt((k+2)/(n-k-2)))
+  if(length(inds)!=0){dfitsdf$Label[inds] = row_num[inds]}
+  
+  cddf = data.frame(Values = cooks.distance(l_m), Row_Num = row_num, Type = rep("Cook's Distance", length(row_num)),Point_Type = rep('Influential', length(row_num)), Bound1 = 1, Bound2 = 1)
+  cddf$Label = NA
+  inds = cooks.distance(l_m) > 1
+  if(length(inds)!=0){cddf$Label[inds] = row_num[inds]}
+  
+  cvdf = data.frame(Values = covratio(l_m), Row_Num = row_num, Type = rep("Covariance Ratio", length(row_num)),Point_Type = rep('Influential', length(row_num)), Bound1 = 1 + 3*(k+1)/n, Bound2 = 1 - 3*(k+1)/n)
+  cvdf$Label = NA
+  inds = covratio(l_m) > 1 + 3*(k+1)/n | covratio(l_m) < 1 - 3*(k+1)/n
+  if(length(inds)!=0){cvdf$Label[inds] = row_num[inds]}
+  
+  ret_df = rbind(hatdf, instdf, extdf, dfitsdf, cddf, cvdf)
+  return(ret_df)
+}
+```
+
+## Loading - Power Plant 1
+
+```{r loading}
+df1 = read.csv('Data/Plant_1_Generation_Data.csv', stringsAsFactors = T)
+df1$DATE_TIME = strptime(as.character(df1$DATE_TIME), format = "%d-%m-%Y %H:%M")#Converting to timestamp
+
+wdf1 = read.csv('Data/Plant_1_Weather_Sensor_Data.csv', stringsAsFactors = T)
+wdf1$DATE_TIME = strptime(as.character(wdf1$DATE_TIME), format = "%Y-%m-%d %H:%M:%S")#Conerting to timestamp
+
+#Joining Datasets
+wdf1 = wdf1[,c('DATE_TIME', "AMBIENT_TEMPERATURE", "MODULE_TEMPERATURE", "IRRADIATION" )]
+df = merge(df1, wdf1)
+```
+
+### Distribution of Weather Variables
+
+```{r eda1, fig.width= 5, fig.height=4, units = 'in'}
+
+#plotdists(df1[,c(-1,-2,-3)],'Plots/p1_generation_', brtype = 'Scott')
+plotdists(wdf1[,-1],'Plots/p1_weather_',)
+```
+
+### Inverter EDA
+
+```{r alltotalyields, fig.width = 5, fig.height=2.5, units = 'in'}
+
+#Max Yields
+maxyields = data.frame('SOURCE_KEY' = as.character(), 'Max_Total_Yield' = as.numeric())
+for (key in levels(df$SOURCE_KEY)){
+  yields = df$TOTAL_YIELD[df$SOURCE_KEY==key]
+  dfa = data.frame('SOURCE_KEY' = key, 'Max_Total_Yield' = max(yields))
+  maxyields = rbind(dfa, maxyields)
+}
+
+#Average Daily Yield
+dailyyield = data.frame('SOURCE_KEY' = as.character(), 'Avg_Daily_Yield' = as.numeric(),'Avg_DC_Power' = as.numeric(), 'Avg_AC_Power' = as.numeric())
+
+for (key in levels(df$SOURCE_KEY)){
+  keydf = df[df$SOURCE_KEY==key,]
+  keydf$dates = factor(as.Date(keydf$DATE_TIME))
+  maxvec = as.numeric()
+  dcvec = as.numeric()
+  acvec = as.numeric()
+  for (d in levels(keydf$dates)){
+    datedf = keydf[keydf$dates == d,]
+    maxvec = c(max(datedf$DAILY_YIELD), maxvec)
+    dcvec = c(mean(datedf$DC_POWER), dcvec)
+    acvec = c(mean(datedf$AC_POWER), acvec)
+  }
+  dfa = data.frame('SOURCE_KEY' = key, 'Avg_Daily_Yield' = mean(maxvec), 'Avg_DC_Power' = mean(dcvec), 'Avg_AC_Power' = mean(acvec) )
+  dailyyield = rbind(dfa, dailyyield)
+}
+
+yielddf = merge(maxyields, dailyyield)
+
+yielddf.m = melt(yielddf)
+
+ggplot(data = yielddf.m, aes(x = value))+geom_boxplot()+facet_wrap(~variable, scales = 'free')+plot_opts+theme(axis.text.y = element_blank(), axis.ticks.y = element_blank(), axis.title.x = element_blank())
+
+ggsave('Plots/invertereda.pdf', dpi = 600)
+```
+  
+It looks like there are two outliers for each, the worse performing source key is 1BY6WEcLGh8j5v7 while the other is bvBOhCH3iADSZry .
+
+### Time EDA
+
+Similarly, daily values of all variables will be analyzed.
+
+```{r timeeda}
+df$DATES = factor(as.Date(df$DATE_TIME))
+dailydf = data.frame()
+
+for (d in levels(df$DATES)){
+  datedf = df[df$DATES==d,]
+  datedf = datedf[,c(-1,-2,-3,-length(datedf))]
+  dfnew = t(as.data.frame(colMeans(datedf)))
+  row.names(dfnew) = d
+  dailydf = rbind(dfnew, dailydf)
+}
+
+#dailydf$DATE = row.names(dailydf)
+
+plotdists(dailydf, path = 'Plots/dailyeda')
+```
+
+```{r saveclean}
+write.csv(x = df, file = 'Data/Plant_1_Clean.csv')
+```
+
+### ARIMA Model
+
+Below will aggregate all ac power measurements for the plant. 
+
+```{r aggregation}
+dt = factor(df$DATE_TIME)
+dfnew = data.frame('DATE_TIME' = rep(NA,length(levels(dt))), 'Avg_AC' = rep(NA,length(levels(dt))))
+
+i = 1
+for (d in levels(dt)){
+  dtdf = df[df$DATE_TIME == d, ]
+  dfnew$DATE_TIME[i] = d
+  dfnew$Avg_AC[i] = sum(dtdf$DAILY_YIELD)
+  i = i +1
+}
+dfnew$Sum_AC = dfnew$Avg_AC
+dfnew = dfnew[,-2]
+
+```
+
+```{r writeagg}
+write.csv(x = dfnew, file = 'Data/aggregated_yield.csv')
+```
+
+
+## Linear Regression
+
+```{r linreg}
+
+regdf = df[,c('DC_POWER', 'IRRADIATION', 'MODULE_TEMPERATURE')]
+lmodel = lm(DC_POWER~0 +MODULE_TEMPERATURE + IRRADIATION, data=regdf)
+summary(lmodel)
+rmse = sqrt(mean(lmodel$residuals**2))
+rmse
+n.sims = 1000
+sim.1 <- sim (lmodel, n.sims)
+
+temp.coef <- sim.1@coef[,1]
+irr.coef =sim.1@coef[,2]
+
+hist(temp.coef, xlab = 'Temperature Coefficient, kW/°C', main = '')
+hist(irr.coef, xlab = 'Irradiation Coefficient, m^2', main = '')
+```
+
+
+
+
